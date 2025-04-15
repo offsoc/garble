@@ -23,8 +23,6 @@ package main
 
 // Each pair is the obfuscated and then the real name.
 // The pairs are sorted by obfuscated name, lexicographically.
-var _originalNamePairs = []string{}
-
 var _originalNamesReplacer *_genericReplacer
 
 //disabledgo:linkname _originalNamesInit internal/abi._originalNamesInit
