@@ -42,7 +42,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/rogpeppe/go-internal/cache"
-	"golang.org/x/mod/module"
 	"golang.org/x/tools/go/ast/astutil"
 	"golang.org/x/tools/go/ssa"
 	"mvdan.cc/garble/internal/ctrlflow"
@@ -291,8 +290,8 @@ func (e errJustExit) Error() string { return fmt.Sprintf("exit: %d", e) }
 
 func goVersionOK() bool {
 	const (
-		minGoVersion  = "go1.23.5" // the minimum Go version we support; could be a bugfix release if needed
-		unsupportedGo = "go1.24"   // the first major version we don't support
+		minGoVersion  = "go1.24" // the minimum Go version we support; could be a bugfix release if needed
+		unsupportedGo = "go1.25" // the first major version we don't support
 	)
 
 	// rxVersion looks for a version like "go1.2" or "go1.2.3" in `go env GOVERSION`.
@@ -369,38 +368,6 @@ func mainErr(args []string) error {
 		mod := &info.Main
 		if mod.Replace != nil {
 			mod = mod.Replace
-		}
-
-		// For the tests.
-		if v := os.Getenv("GARBLE_TEST_BUILDSETTINGS"); v != "" {
-			var extra []debug.BuildSetting
-			if err := json.Unmarshal([]byte(v), &extra); err != nil {
-				return err
-			}
-			info.Settings = append(info.Settings, extra...)
-		}
-
-		// Until https://github.com/golang/go/issues/50603 is implemented,
-		// manually construct something like a pseudo-version.
-		// TODO: remove when this code is dead, hopefully in Go 1.22.
-		if mod.Version == "(devel)" {
-			var vcsTime time.Time
-			var vcsRevision string
-			for _, setting := range info.Settings {
-				switch setting.Key {
-				case "vcs.time":
-					// If the format is invalid, we'll print a zero timestamp.
-					vcsTime, _ = time.Parse(time.RFC3339Nano, setting.Value)
-				case "vcs.revision":
-					vcsRevision = setting.Value
-					if len(vcsRevision) > 12 {
-						vcsRevision = vcsRevision[:12]
-					}
-				}
-			}
-			if vcsRevision != "" {
-				mod.Version = module.PseudoVersion("", "", vcsTime, vcsRevision)
-			}
 		}
 
 		fmt.Printf("%s %s\n\n", mod.Path, mod.Version)
@@ -602,16 +569,30 @@ This command wraps "go %s". Below is its help:
 	os.Setenv("GARBLE_SHARED", sharedTempDir)
 
 	if flagDebugDir != "" {
+		origDir := flagDebugDir
 		flagDebugDir, err = filepath.Abs(flagDebugDir)
 		if err != nil {
 			return nil, err
 		}
-
-		if err := os.RemoveAll(flagDebugDir); err != nil {
-			return nil, fmt.Errorf("could not empty debugdir: %v", err)
+		sentinel := filepath.Join(flagDebugDir, ".garble-debugdir")
+		if entries, err := os.ReadDir(flagDebugDir); errors.Is(err, fs.ErrNotExist) {
+		} else if err == nil && len(entries) == 0 {
+			// It's OK to delete an existing directory as long as it's empty.
+		} else if _, err := os.Lstat(sentinel); err == nil {
+			// It's OK to delete a non-empty directory which was created by an earlier
+			// invocation of `garble -debugdir`, which we know by leaving a sentinel file.
+			if err := os.RemoveAll(flagDebugDir); err != nil {
+				return nil, fmt.Errorf("could not empty debugdir: %v", err)
+			}
+		} else {
+			return nil, fmt.Errorf("debugdir %q has unknown contents; empty it first", origDir)
 		}
+
 		if err := os.MkdirAll(flagDebugDir, 0o755); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("could not create debugdir directory: %v", err)
+		}
+		if err := os.WriteFile(sentinel, nil, 0o666); err != nil {
+			return nil, fmt.Errorf("could not create debugdir sentinel: %v", err)
 		}
 	}
 
@@ -714,7 +695,7 @@ func (tf *transformer) transformAsm(args []string) ([]string, error) {
 
 			// Preprocessor lines to include another file.
 			// For example: #include "foo.h"
-			if quoted := strings.TrimPrefix(line, "#include"); quoted != line {
+			if quoted, ok := strings.CutPrefix(line, "#include"); ok {
 				quoted = strings.TrimSpace(quoted)
 				path, err := strconv.Unquote(quoted)
 				if err != nil { // note that strconv.Unquote errors do not include the input string
@@ -1204,10 +1185,9 @@ func (tf *transformer) transformLinkname(localName, newName string) (string, str
 
 	var newForeignName string
 	if receiver, name, ok := strings.Cut(foreignName, "."); ok {
-		if strings.HasPrefix(receiver, "(*") {
+		if receiver, ok = strings.CutPrefix(receiver, "(*"); ok {
 			// pkg/path.(*Receiver).method
-			receiver = strings.TrimPrefix(receiver, "(*")
-			receiver = strings.TrimSuffix(receiver, ")")
+			receiver, _ = strings.CutSuffix(receiver, ")")
 			receiver = "(*" + hashWithPackage(lpkg, receiver) + ")"
 		} else {
 			// pkg/path.Receiver.method
@@ -1253,7 +1233,7 @@ func (tf *transformer) processImportCfg(flags []string, requiredPkgs []string) (
 		}
 	}
 
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
@@ -1351,7 +1331,7 @@ func (tf *transformer) processImportCfg(flags []string, requiredPkgs []string) (
 			// See exporttest/*.go in testdata/scripts/test.txt.
 			// For now, spot the pattern and avoid the unnecessary error;
 			// the dependency is unused, so the packagefile line is redundant.
-			// This still triggers as of go1.21.
+			// This still triggers as of go1.24.
 			if strings.HasSuffix(tf.curPkg.ImportPath, ".test]") && strings.HasPrefix(tf.curPkg.ImportPath, impPath) {
 				continue
 			}
@@ -1387,7 +1367,7 @@ type pkgCache struct {
 	// unless we were smart enough to detect which arguments get used as %#v or %T.
 	ReflectAPIs map[funcFullName]map[int]bool
 
-	// ReflectObjectNames maps obfuscated names which are reflected to their "real"
+	// ReflectObjectNames maps obfuscated names which are reflected to their original
 	// non-obfuscated names.
 	ReflectObjectNames map[objectString]string
 }
@@ -1683,21 +1663,23 @@ func computeFieldToStruct(info *types.Info) map[*types.Var]*types.Struct {
 // Since types can be recursive, we need a map to avoid cycles.
 // We only need to track named types as done, as all cycles must use them.
 func recordType(used, origin types.Type, done map[*types.Named]bool, fieldToStruct map[*types.Var]*types.Struct) {
+	used = types.Unalias(used)
 	if origin == nil {
 		origin = used
-	}
-	origin = types.Unalias(origin)
-	used = types.Unalias(used)
-	type Container interface{ Elem() types.Type }
-	switch used := used.(type) {
-	case Container:
-		// origin may be a *types.TypeParam, which is not a Container.
+	} else {
+		origin = types.Unalias(origin)
+		// origin may be a [*types.TypeParam].
 		// For now, we haven't found a need to recurse in that case.
 		// We can edit this code in the future if we find an example,
 		// because we panic if a field is not in fieldToStruct.
-		if origin, ok := origin.(Container); ok {
-			recordType(used.Elem(), origin.Elem(), done, fieldToStruct)
+		if _, ok := origin.(*types.TypeParam); ok {
+			return
 		}
+	}
+	type Container interface{ Elem() types.Type }
+	switch used := used.(type) {
+	case Container:
+		recordType(used.Elem(), origin.(Container).Elem(), done, fieldToStruct)
 	case *types.Named:
 		if done[used] {
 			return
@@ -1964,7 +1946,7 @@ func (tf *transformer) transformGoFile(file *ast.File) *ast.File {
 				return true
 			}
 
-			sign := obj.Type().(*types.Signature)
+			sign := obj.Signature()
 			if sign.Recv() == nil {
 				debugName = "func"
 			} else {
@@ -2274,7 +2256,7 @@ func flagValue(flags []string, name string) string {
 // those whose values compose a list.
 func flagValueIter(flags []string, name string, fn func(string)) {
 	for i, arg := range flags {
-		if val := strings.TrimPrefix(arg, name+"="); val != arg {
+		if val, ok := strings.CutPrefix(arg, name+"="); ok {
 			// -name=value
 			fn(val)
 		}
@@ -2324,6 +2306,7 @@ To install Go, see: https://go.dev/doc/install
 	if err := json.Unmarshal(out, &sharedCache.GoEnv); err != nil {
 		return fmt.Errorf(`cannot unmarshal from "go env -json": %w`, err)
 	}
+	sharedCache.GoCmd = filepath.Join(sharedCache.GoEnv.GOROOT, "bin", "go")
 	sharedCache.GOGARBLE = cmp.Or(os.Getenv("GOGARBLE"), "*") // we default to obfuscating everything
 	return nil
 }

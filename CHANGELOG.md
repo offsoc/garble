@@ -1,5 +1,48 @@
 # Changelog
 
+## [v0.14.2] - 2025-04-13
+
+This bugfix release fixes a number of issues and continues support
+for Go 1.23 and 1.24.
+
+Toolchain upgrades via `GOTOOLCHAIN` now work correctly; the transparent
+upgrade could lead to "linked object header mismatch" errors as garble
+was accidentally mixing the original and upgraded toolchain versions.
+
+`garble -debugdir` now refuses to delete a non-empty directory if its
+contents were not created by a previous `-debugdir` invocation.
+This should prevent mistakes which could lead to losing important files.
+
+Function intrinsics were not being picked up correctly from Go 1.24;
+this could lead to degraded performance for some users, as obfuscating
+their names prevented the toolchain from optimizing them.
+
+## [v0.14.1] - 2025-02-12
+
+This release adds support for Go 1.24 and continues support for Go 1.23.
+
+## [v0.14.0] - 2025-01-26
+
+This release drops support for Go 1.22 and continues support for Go 1.23.
+
+@lu4p improved the compatibility with reflection of Go types by collecting
+the set of all types used with reflection during the entire build,
+and then inject the de-obfuscation of their names in the link step.
+Thanks to this, many more Go packages should work out of the box,
+and the README caveat suggesting the use of "reflection hints" is removed.
+
+@mvdan replaced our own tracking of type aliases, necessary given that the
+alias name becomes a field name when embedded into a struct type.
+We now rely entirely on upstream Go's tracking of aliases in `go/types`.
+Note that this means that Garble now requires Go 1.23.5 or later,
+given that alias tracking did not work properly in previous Go versions.
+
+A number of fixes are also included:
+* Reduce the amount of info fetched from `go list -json` for a ~2% speed-up 
+* Package names and paths are now obfuscated separately
+* Hashing of struct types to obfuscate field names is now better implemented
+* Fix a panic which could occur when using structs as type parameters
+
 ## [v0.13.0] - 2024-09-05
 
 This release drops support for Go 1.21 and adds support for Go 1.23.
@@ -292,7 +335,10 @@ Known bugs:
 * obfuscating the standard library with `GOPRIVATE=*` is not well supported yet
 * `garble test` is temporarily disabled, as it is currently broken
 
-[v0.12.1]: https://github.com/burrowers/garble/releases/tag/v0.12.1
+[v0.14.2]: https://github.com/burrowers/garble/releases/tag/v0.14.2
+[v0.14.1]: https://github.com/burrowers/garble/releases/tag/v0.14.1
+[v0.14.0]: https://github.com/burrowers/garble/releases/tag/v0.14.0
+[v0.13.0]: https://github.com/burrowers/garble/releases/tag/v0.13.0
 
 [v0.12.0]: https://github.com/burrowers/garble/releases/tag/v0.12.0
 [#690]: https://github.com/burrowers/garble/issues/690
